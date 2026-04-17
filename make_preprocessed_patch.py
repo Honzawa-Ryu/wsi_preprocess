@@ -5,8 +5,6 @@ import os
 from saturation_otsu import get_slice_idx
 from PIL import Image
 
-# （ユーザー提供の）get_slice_idx関数をここに貼り付けるか、インポートしてください
-
 def save_patches_from_wsi(image_path, patch_size, output_dir, slice_min_patch=500):
     """
     WSIから組織切片のパッチをオフラインで作成・保存する関数
@@ -77,9 +75,6 @@ def save_patches_from_wsi(image_path, patch_size, output_dir, slice_min_patch=50
 
     print("パッチの保存が完了しました。")
 
-# get_slice_idx 関数は、このコードの上部または別のファイルからインポートされていることを前提とします。
-# def get_slice_idx(...): ...
-
 def process_all_wsi_in_directory(input_dir, output_root_dir, patch_size, slice_min_patch=500):
     """
     指定されたディレクトリ内のすべてのWSIファイルを処理し、パッチを保存する関数。
@@ -105,15 +100,12 @@ def process_all_wsi_in_directory(input_dir, output_root_dir, patch_size, slice_m
             image_path = os.path.join(input_dir, filename)
             
             # 各WSIファイルごとに専用の出力ディレクトリを作成
-            # 例: "sample1.svs" -> "output_patches/sample1"
             base_filename = os.path.splitext(filename)[0]
             output_dir = os.path.join(output_root_dir, base_filename)
             
             print(f"--- {filename} の処理を開始します ---")
             
             try:
-                # WSIを処理する関数（前回の回答で示した関数）を呼び出す
-                # `save_patches_from_wsi`関数をこのコード内で定義するか、インポートする必要があります
                 save_patches_from_wsi(image_path, patch_size, output_dir, slice_min_patch)
                 print(f"--- {filename} の処理が完了しました ---")
             except Exception as e:
@@ -123,10 +115,10 @@ def process_all_wsi_in_directory(input_dir, output_root_dir, patch_size, slice_m
 # 実行例
 if __name__ == "__main__":
     # WSIファイルが保存されているディレクトリ
-    input_directory = "/workspace/Liver"
+    input_directory = "/workspace/98_raw-data/shionogi_wsi/F0219_Thioacetamide"
     
     # 全てのパッチを保存するルートディレクトリ
-    output_root_directory = "/workspace/Liver/preprocessed"
+    output_root_directory = "/workspace/98_raw-data/shionogi_wsi/pathch_taa"
     
     # パッチのサイズ
     p_size = 256
