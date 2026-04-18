@@ -25,7 +25,7 @@ def get_blur(image: OpenSlide, patch_size: int, kernel: str='near4', show_tqdm=F
            "near4"       "near8"
         [[ 0, 1, 0],  [[ 1, 1, 1],
          [ 1,-4, 1],   [ 1,-8, 1],
-         [ 0, 1, 1]]  [[ 1, 1, 1]]
+         [ 0, 1, 0]]  [[ 1, 1, 1]]
         の2つが使われているので, "near4"または"near8"のどちらかを指定する。
         TG-GATEs病理画像ではどちらもあまり変わらなかったです。
     show_tqdm: bool
