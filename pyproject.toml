@@ -8,6 +8,7 @@ dependencies = [
     "h5py",
     "tiffslide",
     "tqdm",
+    "psutil"
 ]
 
 [build-system]
