@@ -22,9 +22,17 @@ class WSIProcessor:
             "num_slices": 0
         }
 
-    def run(self, out_dir):
+    def run(self, out_dir, blur_threshold=None, save_all_scores=True, kernel='near4'):
         """前処理をグリッドベースで実行し、高速に H5 保存する"""
         print(f"Processing slide: {self.slide_path.name}")
+
+        kernels = {
+            'near4': np.array([[0,1,0], [1,-4,1], [0,1,0]]),
+            'near8': np.array([[1,1,1], [1,-8,1], [1,1,1]])
+        }
+        if kernel not in kernels:
+            raise ValueError(f"Kernel {kernel} is not supported in get_blur().")
+        kernel = kernels[kernel]
         
         # 1. サムネイルの取得とマスク作成
         level = min(2, len(self.slide.level_dimensions) - 1)
@@ -48,6 +56,7 @@ class WSIProcessor:
         final_patches = []
         final_coords = []
         final_slice_ids = []
+        blur_scores = []
 
         # グリッド状に座標を生成（パッチサイズずつ飛ばしてループ）
         # c, r はサムネイル上の座標
@@ -68,12 +77,22 @@ class WSIProcessor:
                 x, y = int(c * scale), int(r * scale)
                 patch = np.array(self.slide.read_region((x, y), 0, (self.patch_size, self.patch_size)).convert("RGB"))
                 
+                gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+                edge = cv2.filter2D(gray, cv2.CV_32F, kernel=kernel)
+                blur_score = np.mean(np.abs(edge))
+
+                if blur_threshold is not None and blur_score < blur_threshold:
+                    continue
+
+                blur_scores.append(blur_score)
+
                 # リストに一時保存（H5への頻繁なアクセスを避ける）
                 final_patches.append(patch)
                 final_coords.append([x, y])
                 final_slice_ids.append(slice_id - 1)
 
         # 2. まとめて HDF5 に保存
+        # 現状はすべてのパッチを一気に保存していますが、必要に応じてここを分割して保存することも可能
         out_path = Path(out_dir) / f"{self.slide_path.stem}.h5"
         with h5py.File(out_path, "w") as f:
             if final_patches:
@@ -82,6 +101,16 @@ class WSIProcessor:
                                  dtype='uint8', compression="gzip", chunks=True)
                 f.create_dataset("coords", data=np.array(final_coords), dtype='int32')
                 f.create_dataset("slice_ids", data=np.array(final_slice_ids), dtype='int32')
+                if save_all_scores:
+                    f.create_dataset("blur_scores", data=np.array(blur_scores), dtype='float32')
+            else:
+                # パッチが一つもない場合は空のデータセットを作成
+                f.create_dataset("images", data=np.empty((0, self.patch_size, self.patch_size, 3), dtype='uint8'), 
+                                 dtype='uint8', compression="gzip", chunks=True)
+                f.create_dataset("coords", data=np.empty((0, 2), dtype='int32'), dtype='int32')
+                f.create_dataset("slice_ids", data=np.empty((0,), dtype='int32'), dtype='int32')
+                if save_all_scores:
+                    f.create_dataset("blur_scores", data=np.empty((0,), dtype='float32'), dtype='float32')
 
         # 実行結果をキャッシュ
         self.results.update({
@@ -105,7 +134,7 @@ class WSIProcessor:
         
         # スライスごとに色を変えてパッチ位置をプロット
         # colors[0]は背景、1以降が各スライス
-        colors = np.random.randint(0, 255, (self.results["num_slices"] + 1, 3))
+        colors = np.random.randint(120, 255, (self.results["num_slices"] + 1, 3))
         
         for i, (x, y) in enumerate(self.results["patch_coords"]):
             cx, cy = int(x / scale), int(y / scale)
