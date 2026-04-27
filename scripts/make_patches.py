@@ -49,7 +49,7 @@ def main(args):
 
     # 再帰的に .svs を探す（data/findings/*.svs）
     # slide_path.parent.name が 'findings' の名前になる
-    slide_paths = list(slide_dir.glob("*/*.svs"))
+    slide_paths = list(slide_dir.glob("*.svs"))
     
     if not slide_paths:
         print(f"No .svs files found in {slide_dir}")
