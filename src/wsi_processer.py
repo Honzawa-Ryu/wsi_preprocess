@@ -4,6 +4,7 @@ import h5py
 import tiffslide
 from tqdm import tqdm
 from pathlib import Path
+import argparse
 
 class WSIProcessor:
     def __init__(self, slide_path, patch_size=256):
@@ -16,150 +17,182 @@ class WSIProcessor:
         self.results = {
             "thumbnail": None,
             "scale": None,
-            "global_threshold": None,
-            "patch_coords": None,    # 保存されたパッチの座標 (N, 2)
-            "slice_ids": None,       # 各パッチのスライスID (N,)
+            "patch_coords": None,
+            "slice_ids": None,
+            "blur_scores": None,
             "num_slices": 0
         }
 
-    def run(self, out_dir, blur_threshold=None, save_all_scores=True, kernel='near4'):
-        """前処理をグリッドベースで実行し、高速に H5 保存する"""
-        print(f"Processing slide: {self.slide_path.name}")
+    def calculate_blur_score_val(self, patch_rgb):
+        """ラプラシアンの分散を用いて鮮明さを計算する"""
+        gray = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2GRAY)
+        score = cv2.Laplacian(gray, cv2.CV_64F).var()
+        return score
 
-        kernels = {
-            'near4': np.array([[0,1,0], [1,-4,1], [0,1,0]]),
-            'near8': np.array([[1,1,1], [1,-8,1], [1,1,1]])
-        }
-        if kernel not in kernels:
-            raise ValueError(f"Kernel {kernel} is not supported in get_blur().")
-        kernel = kernels[kernel]
+    def calculate_blur_score_mean(self, patch_rgb):
+        gray = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2GRAY)
+        # near8相当の処理
+        kernel = np.array([[1, 1, 1], [1, -8, 1], [1, 1, 1]], dtype=np.float32)
+        edge = cv2.filter2D(gray, cv2.CV_32F, kernel=kernel)
+        return np.mean(np.abs(edge))
+
+    def run(self, out_dir):
+        """前処理を実行し、逐次 HDF5 に保存する"""
+        print(f"Processing slide: {self.slide_path.name}")
+        out_path = Path(out_dir) / f"{self.slide_path.stem}.h5"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         
         # 1. サムネイルの取得とマスク作成
         level = min(2, len(self.slide.level_dimensions) - 1)
         thumbnail = np.array(self.slide.read_region((0, 0), level, self.slide.level_dimensions[level]).convert("RGB"))
         gray_thumb = cv2.cvtColor(thumbnail, cv2.COLOR_RGB2GRAY)
         
-        # 大津法による二値化
-        thresh, _ = cv2.threshold(gray_thumb, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        mask = (gray_thumb < thresh).astype(np.uint8) * 255
+        # 大津法で組織部を抽出
+        thresh, mask = cv2.threshold(gray_thumb, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
-        # 連結成分解析（スライスID用）
+        # 連結成分解析（スライスごとのID付け）
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
-        
         scale = self.slide.level_downsamples[level]
+        slide_w, slide_h = self.slide.dimensions
+        h_thumb, w_thumb = mask.shape
         
-        # --- 修正ポイント：グリッド座標の計算 ---
-        # サムネイル上でのパッチサイズ（歩幅）を計算
-        thumb_step = int(self.patch_size / scale)
-        h, w = mask.shape
-        
-        final_patches = []
-        final_coords = []
-        final_slice_ids = []
-        blur_scores = []
+        step = self.patch_size
+        # サムネイル上での「組織として認める最小面積」の計算
+        threshold_area_thumb = (self.patch_size**2 * 500) / (scale**2)
 
-        # グリッド状に座標を生成（パッチサイズずつ飛ばしてループ）
-        # c, r はサムネイル上の座標
-        for r in tqdm(range(0, h - thumb_step, thumb_step), desc="Rows"):
-            for c in range(0, w - thumb_step, thumb_step):
-                
-                # パッチ範囲のマスクを確認（ここが「事前チェック」）
-                mask_patch = mask[r:r+thumb_step, c:c+thumb_step]
-                if np.mean(mask_patch > 0) < 0.2: # 20%以上が組織でなければスキップ
-                    continue
-                
-                # スライスIDの取得（中心点などのラベルを採用）
-                slice_id = labels[r + thumb_step//2, c + thumb_step//2]
-                if slice_id == 0 or stats[slice_id, cv2.CC_STAT_AREA] * (scale**2) < 10000: 
-                    continue
-
-                # レベル0での座標に変換して読み込み
-                x, y = int(c * scale), int(r * scale)
-                patch = np.array(self.slide.read_region((x, y), 0, (self.patch_size, self.patch_size)).convert("RGB"))
-                
-                gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
-                edge = cv2.filter2D(gray, cv2.CV_32F, kernel=kernel)
-                blur_score = np.mean(np.abs(edge))
-
-                if blur_threshold is not None and blur_score < blur_threshold:
-                    continue
-
-                blur_scores.append(blur_score)
-
-                # リストに一時保存（H5への頻繁なアクセスを避ける）
-                final_patches.append(patch)
-                final_coords.append([x, y])
-                final_slice_ids.append(slice_id - 1)
-
-        # 2. まとめて HDF5 に保存
-        # 現状はすべてのパッチを一気に保存していますが、必要に応じてここを分割して保存することも可能
-        out_path = Path(out_dir) / f"{self.slide_path.stem}.h5"
+        # HDF5の準備（逐次書き込み用に maxshape を設定）
         with h5py.File(out_path, "w") as f:
-            if final_patches:
-                # 一気に配列に変換して書き込む（これが最速）
-                f.create_dataset("images", data=np.array(final_patches), 
-                                 dtype='uint8', compression="gzip", chunks=True)
-                f.create_dataset("coords", data=np.array(final_coords), dtype='int32')
-                f.create_dataset("slice_ids", data=np.array(final_slice_ids), dtype='int32')
-                if save_all_scores:
-                    f.create_dataset("blur_scores", data=np.array(blur_scores), dtype='float32')
-            else:
-                # パッチが一つもない場合は空のデータセットを作成
-                f.create_dataset("images", data=np.empty((0, self.patch_size, self.patch_size, 3), dtype='uint8'), 
-                                 dtype='uint8', compression="gzip", chunks=True)
-                f.create_dataset("coords", data=np.empty((0, 2), dtype='int32'), dtype='int32')
-                f.create_dataset("slice_ids", data=np.empty((0,), dtype='int32'), dtype='int32')
-                if save_all_scores:
-                    f.create_dataset("blur_scores", data=np.empty((0,), dtype='float32'), dtype='float32')
+            dset_img = f.create_dataset("images", (0, step, step, 3), maxshape=(None, step, step, 3), 
+                                        dtype='uint8', compression="gzip", chunks=(1, step, step, 3))
+            dset_coords = f.create_dataset("coords", (0, 2), maxshape=(None, 2), dtype='int32')
+            dset_slices = f.create_dataset("slice_ids", (0,), maxshape=(None,), dtype='int32')
+            dset_blur_mean = f.create_dataset("blur_scores_mean", (0,), maxshape=(None,), dtype='float32')
+            dset_blur_val = f.create_dataset("blur_scores_val", (0,), maxshape=(None,), dtype='float32')
 
-        # 実行結果をキャッシュ
+            final_coords = []
+            final_slice_ids = []
+            final_blur_scores_mean = []
+            final_blur_scores_val = []
+            count = 0
+
+            # グリッド走査
+            for y0 in tqdm(range(0, slide_h - step, step), desc="Rows"):
+                for x0 in range(0, slide_w - step, step):
+                    
+                    # サムネイル座標への換算
+                    r_thumb, c_thumb = int(y0 / scale), int(x0 / scale)
+                    step_thumb = int(step / scale)
+                    
+                    if r_thumb + step_thumb > h_thumb or c_thumb + step_thumb > w_thumb:
+                        continue
+
+                    # 組織含有率のチェック（マスク上で20%以上が組織であること）
+                    mask_patch = mask[r_thumb : r_thumb + step_thumb, c_thumb : c_thumb + step_thumb]
+                    if np.mean(mask_patch > 0) < 0.2:
+                        continue
+                    
+                    # スライスIDの取得（パッチの中心点を使用）
+                    slice_id = labels[r_thumb + step_thumb // 2, c_thumb + step_thumb // 2]
+                    if slice_id == 0 or stats[slice_id, cv2.CC_STAT_AREA] < threshold_area_thumb:
+                        continue
+
+                    # パッチ読み込みとスコア計算
+                    patch = np.array(self.slide.read_region((x0, y0), 0, (step, step)).convert("RGB"))
+                    blur_score_mean = self.calculate_blur_score_mean(patch)
+                    blur_score_val = self.calculate_blur_score_val(patch)
+
+                    # HDF5にパッチを保存
+                    dset_img.resize((count + 1, step, step, 3))
+                    dset_img[count] = patch
+                    
+                    # スコアも保存
+                    dset_blur_mean.resize((count + 1,))
+                    dset_blur_mean[count] = blur_score_mean
+                    dset_blur_val.resize((count + 1,))
+                    dset_blur_val[count] = blur_score_val
+
+                    final_coords.append([x0, y0])
+                    final_slice_ids.append(slice_id - 1)
+                    final_blur_scores_mean.append(blur_score_mean)
+                    final_blur_scores_val.append(blur_score_val)
+                    count += 1
+
+            # 座標とIDを一括保存
+            if count > 0:
+                dset_coords.resize((count, 2))
+                dset_coords[:] = np.array(final_coords)
+                dset_slices.resize((count,))
+                dset_slices[:] = np.array(final_slice_ids)
+
+        # 実行結果を保持（可視化用）
         self.results.update({
             "thumbnail": thumbnail,
             "scale": scale,
-            "global_threshold": thresh,
             "patch_coords": np.array(final_coords),
             "slice_ids": np.array(final_slice_ids),
+            "blur_scores_mean": np.array(final_blur_scores_mean),
+            "blur_scores_val": np.array(final_blur_scores_val),
             "num_slices": num_labels - 1
         })
         return out_path
 
     def visualize(self, save_path=None):
-        """self.results に保存されたデータを使って可視化する"""
-        if self.results["thumbnail"] is None:
-            print("Error: Run the processor first.")
-            return
+        """抽出されたパッチの位置をサムネイル上にプロットする"""
+        if self.results["thumbnail"] is None or self.results["patch_coords"] is None:
+            print("Error: No results to visualize. Run the processor first.")
+            return None
 
         vis_img = self.results["thumbnail"].copy()
         scale = self.results["scale"]
         
-        # スライスごとに色を変えてパッチ位置をプロット
-        # colors[0]は背景、1以降が各スライス
-        colors = np.random.randint(120, 255, (self.results["num_slices"] + 1, 3))
-        
+        # スライスごとに異なる色を生成
+        np.random.seed(42) # 色を固定
+        colors = np.random.randint(50, 255, (self.results["num_slices"] + 1, 3))
+        circle_radius = 3
+
         for i, (x, y) in enumerate(self.results["patch_coords"]):
-            cx, cy = int(x / scale), int(y / scale)
+            x_center = x + self.patch_size // 2
+            y_center = y + self.patch_size // 2
+
+            # --- [修正ポイント2] サムネイル座標への換算 ---
+            cx_thumb = int(x_center / scale)
+            cy_thumb = int(y_center / scale)
             sid = self.results["slice_ids"][i]
             color = colors[sid + 1].tolist()
-            cv2.circle(vis_img, (cx, cy), 2, color, -1)
+            
+            # パッチの存在箇所に矩形を描画
+            s = int(self.patch_size / scale)
+            cv2.circle(vis_img, (cx_thumb, cy_thumb), 
+                                radius=circle_radius, color=color, thickness=-1)
 
         if save_path:
             cv2.imwrite(str(save_path), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
         
         return vis_img
-    
+
+# --- デバッグ・実行用コード ---
 if __name__ == "__main__":
-    import argparse
-    print("Starting WSI Patch Extraction...")
-    parser = argparse.ArgumentParser(description="WSI Patch Extraction")
-    parser.add_argument("slide_path", type=str, help="Path to the WSI file")
-    parser.add_argument("out_dir", type=str, help="Directory to save the output H5 file")
-    parser.add_argument("--visualize", action="store_true", help="Whether to save visualization image")
+    parser = argparse.ArgumentParser(description="WSI Patch Extraction with Blur Scoring")
+    parser.add_argument("slide_path", type=str, help="Path to the WSI file (e.g., .ndpi, .svs, .tif)")
+    parser.add_argument("out_dir", type=str, help="Directory to save the results")
+    parser.add_argument("--patch_size", type=int, default=256, help="Size of the patches")
+    parser.add_argument("--no_vis", action="store_true", help="Disable visualization")
+    
     args = parser.parse_args()
 
-    processor = WSIProcessor(args.slide_path)
-    h5_path = processor.run(args.out_dir)
-    print(f"Saved patches to: {h5_path}")
-
-    if args.visualize:
-        vis_img = processor.visualize(save_path=Path(args.out_dir) / f"{Path(args.slide_path).stem}_vis.png")
-        print(f"Saved visualization to: {Path(args.out_dir) / f'{Path(args.slide_path).stem}_vis.png'}")
+    # インスタンス化
+    processor = WSIProcessor(args.slide_path, patch_size=args.patch_size)
+    
+    # 実行
+    try:
+        h5_path = processor.run(args.out_dir)
+        print(f"Successfully saved {len(processor.results['patch_coords'])} patches to: {h5_path}")
+        
+        # 可視化の実行
+        if not args.no_vis:
+            vis_path = Path(args.out_dir) / f"{Path(args.slide_path).stem}_vis.png"
+            processor.visualize(save_path=vis_path)
+            print(f"Visualization saved to: {vis_path}")
+            
+    except Exception as e:
+        print(f"An error occurred: {e}")
