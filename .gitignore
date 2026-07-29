@@ -1,3 +1,4 @@
+
 *.sh
 *.sif
 data
@@ -6,3 +7,6 @@ data
 *.out
 __pycache__
 .agent*
+
+data/
+
