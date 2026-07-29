@@ -5,6 +5,12 @@ import tiffslide
 from tqdm import tqdm
 from pathlib import Path
 import argparse
+import sys
+
+# このファイルを直接スクリプトとして実行した場合でも src パッケージを解決できるようにする
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src import blur
 
 class WSIProcessor:
     def __init__(self, slide_path, patch_size=256):
@@ -23,18 +29,13 @@ class WSIProcessor:
             "num_slices": 0
         }
 
+    # 指標の実装は src/blur.py に集約し、TRIDENT出力への追記と同一の計算を使う
     def calculate_blur_score_val(self, patch_rgb):
         """ラプラシアンの分散を用いて鮮明さを計算する"""
-        gray = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2GRAY)
-        score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return score
+        return blur.blur_score_val(patch_rgb)
 
     def calculate_blur_score_mean(self, patch_rgb):
-        gray = cv2.cvtColor(patch_rgb, cv2.COLOR_RGB2GRAY)
-        # near8相当の処理
-        kernel = np.array([[1, 1, 1], [1, -8, 1], [1, 1, 1]], dtype=np.float32)
-        edge = cv2.filter2D(gray, cv2.CV_32F, kernel=kernel)
-        return np.mean(np.abs(edge))
+        return blur.blur_score_mean(patch_rgb)
 
     def run(self, out_dir):
         """前処理を実行し、逐次 HDF5 に保存する"""
@@ -69,6 +70,11 @@ class WSIProcessor:
             dset_blur_mean = f.create_dataset("blur_scores_mean", (0,), maxshape=(None,), dtype='float32')
             dset_blur_val = f.create_dataset("blur_scores_val", (0,), maxshape=(None,), dtype='float32')
 
+            # 下流(patch_source / build_dataset)が読み出す属性。書いておかないと
+            # 既定値の256で解決され、メタ情報が実際の切り出し条件とずれる。
+            f.attrs["patch_size"] = self.patch_size
+            f.attrs["patch_level"] = 0
+
             final_coords = []
             final_slice_ids = []
             final_blur_scores_mean = []
@@ -76,8 +82,10 @@ class WSIProcessor:
             count = 0
 
             # グリッド走査
-            for y0 in tqdm(range(0, slide_h - step, step), desc="Rows"):
-                for x0 in range(0, slide_w - step, step):
+            # 終端も含めるため +1 する。これが無いとスライド幅がstepの倍数のとき、
+            # 最後の1行/1列がまるごと落ちる。
+            for y0 in tqdm(range(0, slide_h - step + 1, step), desc="Rows"):
+                for x0 in range(0, slide_w - step + 1, step):
                     
                     # サムネイル座標への換算
                     r_thumb, c_thumb = int(y0 / scale), int(x0 / scale)
@@ -195,4 +203,6 @@ if __name__ == "__main__":
             print(f"Visualization saved to: {vis_path}")
             
     except Exception as e:
+        # 握りつぶすとSlurm側から成功に見えてしまうため、終了コードを立てる
         print(f"An error occurred: {e}")
+        raise SystemExit(1)
