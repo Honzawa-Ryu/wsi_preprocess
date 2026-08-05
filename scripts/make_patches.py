@@ -4,7 +4,7 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
-from src.wsi_processer import WSIProcessor
+from wsi_preprocess import WSIProcessor
 import psutil
 import threading
 import time
