@@ -1,7 +1,6 @@
 """パッチのぼやけ具合を定量する指標をまとめたモジュール。
 
-生WSIからの切り出し(wsi_processer)とTRIDENT出力への追記(add_blur_scores)の
-双方から呼ばれるため、指標の実装はここに一本化する。
+TRIDENT出力(coords h5)への追記(scripts/add_blur_scores.py)から呼ばれる。
 """
 import cv2
 import numpy as np

@@ -2,6 +2,18 @@
 
 `.sif` の作成から学習用データセットの書き出しまで、上から順にコピペすれば通るように書いてある。
 ノード指定は `-p large-preproc` / `-t 4:00:00` を仮に置いているので、環境に合わせて読み替えること。
+GPUノードのパーティション名(`-p gpu` としている箇所)も同様に仮置きなので読み替えること。
+
+パッチ切り出しの経路は2通りある。迷ったら経路C(`main.py`, TRIDENTラッパー)から試すとよい。
+
+| 経路 | 何をする | GPU |
+| --- | --- | --- |
+| B (手順4) | 外部で作った(TRIDENTなど)coordsのみのh5にスコアを後付け | 呼び出し側の責任 |
+| C (手順5) | `main.py`でTRIDENT本体を呼び, セグメンテーション〜ぼやけ付与まで一括 | `hest`(既定)使用時のみ必要, `otsu`ならCPUのみで可 |
+
+いずれの経路も最終的に同じ形式のh5(`coords` + ぼやけスコア)になり、以降の手順(6. データセット構築)を共通で使える。
+(かつてはOtsu実装を自前で持つ「経路A」もあったが、TRIDENTの`--segmenter otsu`が同じことをより成熟した形で
+行うため廃止した。生WSIから直接切り出したい場合は経路Cで`--segmenter otsu --device cpu`を使う。)
 
 ---
 
@@ -15,30 +27,32 @@ wsi_preprocess/
 ├── .env/
 │   ├── env.def          # Apptainerの定義ファイル（リポジトリに同梱）
 │   └── env.sif          # ← これから作る（.gitignore済み）
-├── data/                # 入力WSI。深さは問わない
+├── main.py               # 統合パイプライン(経路C)のエントリーポイント
+├── data/                 # 入力WSI。深さは問わない
 │   ├── caseA/2024/slide001.svs
 │   ├── caseB/slide002.svs
 │   └── slide003.svs
 ├── scripts/
 ├── src/
-├── logs/                # ← ログの出力先。作っておかないとジョブが落ちる
+├── logs/                 # ← ログの出力先。作っておかないとジョブが落ちる
 └── results/
-    ├── h5/              # パッチh5。dataのフォルダ構造を保つ
+    ├── h5/               # 経路Bのパッチh5(TRIDENTを別途直接叩いた出力など)。dataのフォルダ構造を保つ
     │   ├── caseA/2024/slide001.h5
     │   ├── caseB/slide002.h5
     │   └── slide003.h5
-    └── dataset/         # 最終成果物（WebDataset tar）
+    ├── trident/          # 経路C(main.py)の出力先(TRIDENTのjob_dirを兼ねる)
+    └── dataset/          # 最終成果物（WebDataset tar）
 ```
 
 探索対象の拡張子は `.svs .ndpi .tif .tiff .mrxs .scn .vms .bif`。パッチh5は `.h5 .hdf5`。
-探索の挙動は3つのスクリプトで共通で、次のようになっている。
+探索の挙動はスクリプト間で共通で、次のようになっている。
 
 - 拡張子の大文字小文字は区別しない（`.SVS` のような表記が混ざっていても拾う）
 - シンボリックリンクされたディレクトリも辿る（実体を別ボリュームに置いた構成に対応）
 - ディレクトリの代わりに単一ファイルを渡してもよい
 
 `data/A/slide001.svs` と `data/B/slide001.svs` のように**別フォルダに同名のスライド**が
-あってもよい。その場合の扱いは手順5と6に書いてある。
+あってもよい。その場合の扱いは手順4と6に書いてある。
 
 まず作業ディレクトリを決めておく。以降のコマンドはすべてここが起点。
 
@@ -77,9 +91,12 @@ rm -rf "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR"
 apptainer exec .env/env.sif uv --version
 ```
 
-> `.env/env.def` は CUDA イメージがベースになっているが、この前処理はすべてCPUで動く。
-> GPUを使う他の作業と `.sif` を共用する想定でなければ、`Bootstrap` 行を
-> `ubuntu:24.04` に置き換えるとイメージが大幅に小さくなる。
+> `.env/env.def` はCUDAイメージがベース。経路Bだけを使う(TRIDENT本体のセグメンテーション/
+> 特徴量抽出モデルを動かさない)なら実行自体はCPUのみで完結するが、経路C(`main.py`)で既定の
+> `--segmenter hest` や `--patch_encoder` を使う場合はGPU + CUDAが要るため、このイメージの
+> ままにしておくこと。経路B専用で運用する(TRIDENTのGPUモデルを一切使わない)なら
+> `Bootstrap` 行を `ubuntu:24.04` に置き換えてイメージを小さくしてもよいが、その場合は
+> 経路Cで `--segmenter otsu --device cpu` を明示する必要がある。
 
 ---
 
@@ -93,6 +110,11 @@ cd "$PROJ"
 apptainer exec --bind "$PROJ:$PROJ" .env/env.sif uv sync
 ```
 
+TRIDENTは`pyproject.toml`の`[tool.uv.sources]`で固定したGitHubのコミットから直接ビルドされる
+(リポジトリにはコードを同梱していない)。そのため`uv sync`は**GitHubにもアクセスできるネットワーク**
+で実行する必要がある(社内プロキシ配下でPyPIのみ許可、GitHubは不可、という環境だと失敗する)。
+torch含め1GB近くダウンロードするので、初回は数分かかる。
+
 LMDB形式で出力したい場合のみ追加する（WebDataset形式なら不要）。
 
 ```bash
@@ -103,8 +125,23 @@ apptainer exec --bind "$PROJ:$PROJ" .env/env.sif uv add lmdb
 
 ```bash
 apptainer exec --bind "$PROJ:$PROJ" .env/env.sif \
-    .venv/bin/python -c "import tiffslide, h5py, cv2; print('ok')"
+    .venv/bin/python -c "import tiffslide, h5py, cv2, trident; print('ok', trident.__version__)"
 ```
+
+GPUを使う経路C(既定の`--segmenter hest`や`--patch_encoder`)を試すなら、GPUノード上で
+CUDAが見えることも確認しておく(`--nv`を忘れるとCPUにフォールバックし気づきにくい)。
+
+```bash
+srun -p gpu --gres=gpu:1 -t 0:10:00 --pty \
+apptainer exec --nv --bind "$PROJ:$PROJ" .env/env.sif \
+    .venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+```
+
+TRIDENTの一部のパッチエンコーダ(`uni_v1`など)はHugging Face上でgatedなモデルで、
+アクセス許可の取得と`huggingface-cli login`がログインノード側(ネットワークが開いている側)で
+事前に必要。ログイン情報は`$HOME/.cache/huggingface`に保存され、Apptainerは`$HOME`を
+自動でバインドするため計算ノードのジョブからもそのまま使える。経路Cでも
+セグメンテーション+ぼやけ付与だけ(`--patch_encoder`を指定しない)なら不要。
 
 以降、コンテナ内では `uv run` ではなく `.venv/bin/python` を直接叩く。
 `uv run` は実行のたびに依存解決を試みるため、ネットワークの無い計算ノードで詰まることがある。
@@ -113,75 +150,49 @@ apptainer exec --bind "$PROJ:$PROJ" .env/env.sif \
 
 ## 3. 動作確認（1枚だけ対話実行）
 
-いきなり全件流す前に、`srun` で1枚だけ通しておくと事故が減る。
+いきなり全件流す前に、`srun` で1枚だけ通しておくと事故が減る。GPUノードの確保待ちを避けるため、
+まずはCPUのみで動く`--segmenter otsu`で通し方を確認するのが手早い。
 
 ```bash
 cd "$PROJ"
 
 srun -p large-preproc -t 0:30:00 -c 4 --mem=16G --pty \
 apptainer exec --bind "$PROJ:$PROJ" .env/env.sif \
-    .venv/bin/python scripts/make_patches.py \
-        data results/h5_test --n_workers 4 --visualize
+    .venv/bin/python main.py \
+        --wsi_dir data \
+        --out_dir results/trident_test \
+        --segmenter otsu --device cpu \
+        --mag 20 --patch_size 256 \
+        --calc_blur
 ```
 
-`results/h5_test/` 以下に `.h5` と `_vis.png` ができていれば通っている。
-`_vis.png` はサムネイル上に採用パッチを点で描いたもので、背景除去が効いているかの確認に使える。
+`results/trident_test/20x_256px_0px_overlap/patches/` 以下に `<slide>_patches.h5` ができ、
+`results/trident_test/contours/<slide>.jpg` に組織検出のオーバーレイ画像ができていれば通っている
+（背景除去が効いているかはこの画像で確認できる）。
 
 中身の確認:
 
 ```bash
 apptainer exec --bind "$PROJ:$PROJ" .env/env.sif .venv/bin/python - <<'EOF'
 import glob, h5py
-for p in sorted(glob.glob("results/h5_test/**/*.h5", recursive=True)):
+for p in sorted(glob.glob("results/trident_test/**/*_patches.h5", recursive=True)):
     with h5py.File(p) as f:
         print(p, "| patches:", len(f["coords"]), "| keys:", list(f))
 EOF
 ```
 
-パッチが0枚なら「4-1. パッチが0枚になる」を参照。
+パッチが0枚なら「10-4. 経路Cでコマンドは通るのにパッチ/特徴量が0件」を参照。
 
 ---
 
-## 4. 経路A: 生WSIからパッチを切り出す
+## 4. 経路B: 外部で切り出し済みのh5にスコアを足す
 
-`data/` 以下のWSIを再帰的に処理し、`results/h5/` に同じ構造で `.h5` を書き出す。
-このスクリプトは切り出しと同時にぼやけスコアも計算するので、次は手順6に進んでよい。
+すでに `coords` だけを持つh5がある場合(TRIDENTを別途手動で走らせた、他のメンバーの成果物を
+使う、など)はこちら。元WSIから画素を読み直してスコアを計算し、**同じh5に追記する**
+（h5は上書きされるので、心配なら先にコピーを取ること）。
 
-```bash
-cd "$PROJ"
-cat > run_make_patches.sh <<'EOF'
-#!/bin/bash
-#SBATCH -p large-preproc
-#SBATCH -t 4:00:00
-#SBATCH -c 16
-#SBATCH --mem=64G
-#SBATCH -J make_patches
-#SBATCH -o logs/%x_%j.out
-#SBATCH -e logs/%x_%j.err
-
-set -euo pipefail
-cd "$SLURM_SUBMIT_DIR"
-
-# --n_workers を渡さなければ SLURM_CPUS_PER_TASK を自動で拾う
-apptainer exec --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
-    .venv/bin/python scripts/make_patches.py \
-        data \
-        results/h5
-EOF
-
-sbatch run_make_patches.sh
-```
-
-`--visualize` を足すとスライドごとに確認用PNGも出る（枚数が多いと相応に時間とディスクを食う）。
-
-これが一番重い工程で、4時間に収まらないことがある。その場合は手順7の分割実行へ。
-
----
-
-## 5. 経路B: TRIDENTなどで切り出し済みのh5にスコアを足す
-
-すでに `coords` だけを持つh5がある場合はこちら。元WSIから画素を読み直してスコアを計算し、
-**同じh5に追記する**（h5は上書きされるので、心配なら先にコピーを取ること）。
+自分でこれからTRIDENTを走らせるだけなら、この手順を手で行う必要はない。手順5(経路C)の
+`main.py --calc_blur` が同じ処理をセグメンテーション・座標抽出とまとめて1コマンドで行う。
 
 `--wsi_dir` に渡したディレクトリからも、h5のファイル名を手がかりにWSIを再帰的に探す。
 
@@ -213,18 +224,122 @@ sbatch run_add_blur.sh
 - パッチサイズと読み出しレベルはh5の属性から自動取得する。属性が無い場合は
   `--patch_size 256 --patch_level 0` のように明示する。
 - すでにスコアがあるh5はスキップされる。再計算したいときは `--overwrite`。
-- 経路Aで作ったh5に対して実行しても、スキップされるだけで害はない。
 - h5側もフォルダ分けされていてよい。`--wsi_dir` 以下に同名のWSIが複数ある場合は、
   **h5と同じ相対フォルダにあるものを優先**して対応付ける（`results/h5/caseA/x.h5`
   なら `data/caseA/x.svs`）。該当が無ければ末尾のフォルダ名の一致で拾い、それも
   無ければ拡張子の優先度とパス順で決める。取り違えると別スライドのスコアが入るので、
   同名スライドがある場合は起動時の警告が出たら対応関係を確認しておくこと。
+- TRIDENTが書き出す `<slide>_patches.h5` という名前は自動で認識し、`<slide>` 部分だけで
+  WSIを探す(`_patches`サフィックスは無視される)。
+
+---
+
+## 5. 経路C: 統合パイプライン(main.py)でTRIDENTを実行する
+
+TRIDENT本体でのセグメンテーション+パッチ座標抽出から, ぼやけスコア付与, (任意で)学習用パッチ
+抽出までを`main.py`の1コマンドで行う。内部で呼んでいるのは手順4・6に出てくるのと同じ処理
+(TRIDENTの`Processor`, `scripts/add_blur_scores.py`相当, `src/patch_extractor.py`)。
+詳細は[README.md](../README.md)の「統合パイプライン (main.py)」および[PLAN.md](../PLAN.md)を参照。
+
+### 5-1. CPUのみで動かす場合(`--segmenter otsu`)
+
+GPUノードが確保できない、またはまず動作を確認したいとき。既存の`large-preproc`パーティションで動く。
+
+```bash
+cd "$PROJ"
+cat > run_trident_cpu.sh <<'EOF'
+#!/bin/bash
+#SBATCH -p large-preproc
+#SBATCH -t 4:00:00
+#SBATCH -c 16
+#SBATCH --mem=64G
+#SBATCH -J trident_cpu
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+
+set -euo pipefail
+cd "$SLURM_SUBMIT_DIR"
+
+apptainer exec --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
+    .venv/bin/python main.py \
+        --wsi_dir data \
+        --out_dir results/trident \
+        --segmenter otsu --device cpu \
+        --mag 20 --patch_size 256 \
+        --calc_blur \
+        --blur_n_workers "$SLURM_CPUS_PER_TASK"
+EOF
+
+sbatch run_trident_cpu.sh
+```
+
+### 5-2. GPUで動かす場合(既定の`--segmenter hest`、特徴量抽出も使う場合)
+
+`apptainer exec`に**`--nv`を付け忘れるとGPUが見えず、`main.py`は自動でCPU(`otsu`)側に
+フォールバックしてしまう**(エラーにならず気づきにくいので注意)。
+
+```bash
+cd "$PROJ"
+cat > run_trident_gpu.sh <<'EOF'
+#!/bin/bash
+#SBATCH -p gpu
+#SBATCH --gres=gpu:1
+#SBATCH -t 4:00:00
+#SBATCH -c 16
+#SBATCH --mem=64G
+#SBATCH -J trident_gpu
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+
+set -euo pipefail
+cd "$SLURM_SUBMIT_DIR"
+
+apptainer exec --nv --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
+    .venv/bin/python main.py \
+        --wsi_dir data \
+        --out_dir results/trident \
+        --mag 20 --patch_size 256 \
+        --calc_blur \
+        --patch_encoder uni_v1 \
+        --blur_n_workers "$SLURM_CPUS_PER_TASK"
+EOF
+
+sbatch run_trident_gpu.sh
+```
+
+`--patch_encoder`(Step3, 特徴量抽出)は省略可能。指定する場合は、選ぶエンコーダに応じて
+`--mag`/`--patch_size`を正しい組み合わせに揃えること(例: `uni_v1`は`--patch_size 256 --mag 20`、
+`conch_v15`は`--patch_size 512 --mag 20`)。ずれると特徴量として意味を成さない値になる。
+選択肢と対応表は`.claude/skills/trident/reference.md`(Patch encoders節)を参照。
+
+### 5-3. 出力先
+
+```
+results/trident/
+├── contours_geojson/                    セグメンテーション結果
+├── 20x_256px_0px_overlap/
+│   ├── patches/<slide>_patches.h5       座標 + (--calc_blurなら)ぼやけスコア
+│   ├── visualization/<slide>.jpg
+│   └── features_uni_v1/<slide>.h5       --patch_encoderを指定した場合のみ
+├── patches/                             --extract_patches を指定した場合のみ(画像+CSV)
+└── summary.md                           TRIDENT側の実行サマリ
+```
+
+`--extract_patches N`を足すと、スライドごとに最大N枚を`results/trident/patches/`に
+画像ファイル(png)として書き出す(手順6のWebDataset/LMDB化とは別の、簡易な取り出し方)。
+WebDataset/LMDBとしてまとめたい場合は、`results/trident/20x_256px_0px_overlap/patches`を
+入力に手順6の`scripts/build_dataset.py`を実行する(`--extract_patches`は使わない)。
+
+再実行は`--out_dir`が同じであれば再開される(完了済みスライドはスキップ)。ただし
+`--mag`/`--patch_size`/`--overlap`やエンコーダを変えると、TRIDENTは別ディレクトリ
+(`<mag>x_<ps>px_...`)を新規に使うため、再開ではなく新規実行になる。
 
 ---
 
 ## 6. 学習用データセットの構築
 
 ぼやけスコアで足切りし、スライドごとにN枚を抽出してWebDataset(tar)にまとめる。
+経路B/Cのいずれで作ったh5でも(`coords` + ぼやけスコアのデータセットがあれば)使える。
 
 ```bash
 cd "$PROJ"
@@ -245,6 +360,7 @@ apptainer exec --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
     .venv/bin/python scripts/build_dataset.py \
         results/h5 \
         results/dataset \
+        --wsi_dir data \
         --threshold_percentile 50 \
         --n_per_slide 200 \
         --format webdataset \
@@ -254,6 +370,13 @@ apptainer exec --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
 EOF
 
 sbatch run_build_dataset.sh
+```
+
+経路C(`main.py`)の出力を使う場合は、1つ目の引数を座標h5のディレクトリに読み替える。
+
+```bash
+        results/trident/20x_256px_0px_overlap/patches \
+        results/dataset \
 ```
 
 閾値の指定は2通りあり、**どちらか一方のみ**指定する。
@@ -267,11 +390,7 @@ sbatch run_build_dataset.sh
 まず `--threshold_percentile` で通し、`results/dataset/manifest.json` の `per_slide` を見て
 スライドごとの採用枚数に極端な偏りが無いか確認するとよい。
 
-経路B（h5が `coords` のみ）の場合は、ここでも元WSIが要るので `--wsi_dir data` を足す。
-
-```bash
-        --wsi_dir data \
-```
+経路B・経路Cのh5は画素(`images`)を持たず`coords`のみなので、`--wsi_dir data` が必須。
 
 主なオプションは `README.md` の表を参照。符号化は `png` / `npy` のいずれも可逆で、
 JPEGは採用していない（非可逆圧縮は高周波を落とし、ぼやけの評価そのものを壊すため）。
@@ -284,22 +403,19 @@ JPEGは採用していない（非可逆圧縮は高周波を落とし、ぼや�
 
 ```bash
 cd "$PROJ"
-JID1=$(sbatch --parsable run_make_patches.sh)
+JID1=$(sbatch --parsable run_add_blur.sh)          # または run_trident_cpu.sh / run_trident_gpu.sh
 JID2=$(sbatch --parsable --dependency=afterok:"$JID1" run_build_dataset.sh)
-echo "make_patches=$JID1  build_dataset=$JID2"
+echo "add_blur=$JID1  build_dataset=$JID2"
 ```
 
-経路Bなら `run_add_blur.sh` を間に挟む。
-
-```bash
-JID1=$(sbatch --parsable run_add_blur.sh)
-JID2=$(sbatch --parsable --dependency=afterok:"$JID1" run_build_dataset.sh)
-```
+経路Cは1ジョブでセグメンテーション+座標抽出+ぼやけ付与まで完結するので、後段の
+`build_dataset.sh`だけを繋げばよい(手順4(経路B)に相当する部分は`run_trident_*.sh`単体で完了する)。
 
 ### スライドが多くて4時間に収まらない場合
 
 `data/` 直下のサブディレクトリ単位でジョブ配列に分ける。
-出力構造は保たれるので、あとから `results/h5` 全体を1つとして扱える。
+出力構造は保たれるので、あとから `results/h5`(または`results/trident`) 全体を1つとして扱える。
+経路Bの`run_add_blur.sh`を例に示す。
 
 ```bash
 cd "$PROJ"
@@ -308,13 +424,13 @@ cd "$PROJ"
 find data -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort > subsets.txt
 wc -l < subsets.txt
 
-cat > run_make_patches_array.sh <<'EOF'
+cat > run_add_blur_array.sh <<'EOF'
 #!/bin/bash
 #SBATCH -p large-preproc
 #SBATCH -t 4:00:00
 #SBATCH -c 16
 #SBATCH --mem=64G
-#SBATCH -J make_patches_arr
+#SBATCH -J add_blur_arr
 #SBATCH -o logs/%x_%A_%a.out
 #SBATCH -e logs/%x_%A_%a.err
 
@@ -325,14 +441,18 @@ SUBSET=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" subsets.txt)
 echo "subset: $SUBSET"
 
 apptainer exec --bind "$SLURM_SUBMIT_DIR:$SLURM_SUBMIT_DIR" .env/env.sif \
-    .venv/bin/python scripts/make_patches.py \
-        "data/$SUBSET" \
-        "results/h5/$SUBSET"
+    .venv/bin/python scripts/add_blur_scores.py \
+        "results/h5/$SUBSET" \
+        --wsi_dir "data/$SUBSET" \
+        --n_workers "$SLURM_CPUS_PER_TASK"
 EOF
 
 # 同時実行数は %8 の部分で制限する（I/O帯域に合わせて調整）
-sbatch --array=0-$(($(wc -l < subsets.txt) - 1))%8 run_make_patches_array.sh
+sbatch --array=0-$(($(wc -l < subsets.txt) - 1))%8 run_add_blur_array.sh
 ```
+
+経路Cで同様に分割する場合は、`main.py`呼び出しの`--wsi_dir "data/$SUBSET"`
+`--out_dir "results/trident/$SUBSET"`に読み替えれば同じ配列ジョブの形で書ける。
 
 ---
 
@@ -340,11 +460,12 @@ sbatch --array=0-$(($(wc -l < subsets.txt) - 1))%8 run_make_patches_array.sh
 
 ```bash
 squeue -u "$USER"
-tail -f logs/make_patches_*.out
+tail -f logs/add_blur_*.out
 ```
 
-`make_patches` は10秒おきにCPU/RAM使用率を `.out` に吐くので、長時間ジョブではログが伸びる。
-不要なら `scripts/make_patches.py` の `monitor_resources` スレッド起動行をコメントアウトする。
+経路C(`main.py`)はTRIDENT側の進捗バー(`tqdm`)がそのまま`.err`に出るほか、
+`results/trident/summary.md`と`results/trident/wsi_states/<slide>__*.json`にも
+スライドごとの状態(成功/スキップ/エラーとその理由)が残る。
 
 終了サマリは各スクリプトの末尾に出る。失敗したスライドがあれば終了コードが1になるので、
 `sacct` でも判別できる。
@@ -375,33 +496,25 @@ for img, meta in ds:      # img: (256, 256, 3) uint8
 
 LMDB形式で出した場合の読み出しは `README.md` を参照。
 
+経路Cの`--extract_patches`で書き出した画像は`results/trident/patches/<slide_id>/*.png`と
+`results/trident/patches/patches.csv`(座標・スコアの一覧)にそのまま並んでいる。
+
 ---
 
 ## 10. つまずきやすいところ
 
-### 10-1. パッチが0枚になる
-
-組織として認める最小面積が `patch_size**2 * 500`（256なら約3270万px、レベル0換算で
-おおよそ5700×5700px相当）に固定されている。これを下回る組織しか無いスライド
-——生検の小片、TMA、切り出し済みの小さい画像——では、全パッチが落ちて0枚になる。
-
-`--visualize` を付けて `_vis.png` を確認し、組織が写っているのに点が乗らないならこれが原因。
-`src/wsi_processer.py` の `threshold_area_thumb` の係数 `500` を下げる。
-
-ピラミッド（縮小画像）を持たない単層TIFFでも同じことが起きる。サムネイルのレベル決定が
-`min(2, レベル数-1)` なので、単層だと等倍がサムネイル扱いになり面積閾値が実質無限大になる。
-
-### 10-2. 同名のh5が複数フォルダにある
+### 10-1. 同名のh5が複数フォルダにある
 
 `slide_id` は通常ファイル名(stem)をそのまま使うが、`results/h5/A/x.h5` と
 `results/h5/B/x.h5` のように衝突する場合だけ、`build_dataset.py` が相対パスを繋いだ
-`A_x` / `B_x` に置き換える（衝突していないスライドのIDは変わらない）。
+`A_x` / `B_x` に置き換える（衝突していないスライドのIDは変わらない）。TRIDENT形式の
+`<slide>_patches.h5` は自動で`_patches`を除いた`<slide>`として扱われる。
 
 置き換えが起きると起動時に `Note: 同名のh5が複数フォルダにあります` と対応表が出る。
 元のh5は `manifest.json` の `per_slide[slide_id]["path"]` から辿れる。
 素のスライド名でIDを揃えたいなら、事前にリネームしてから流すこと。
 
-### 10-3. 計算ノードでファイルが見えない
+### 10-2. 計算ノードでファイルが見えない
 
 Apptainerが自動でバインドするのは `$HOME` とカレントディレクトリ程度。
 データが別のファイルシステムにあるなら明示的に足す。
@@ -410,11 +523,39 @@ Apptainerが自動でバインドするのは `$HOME` とカレントディレ�
 apptainer exec --bind "$PROJ:$PROJ" --bind /mnt/storage:/mnt/storage .env/env.sif ...
 ```
 
-### 10-4. `uv sync` が計算ノードで失敗する
+### 10-3. `uv sync` が計算ノードで失敗する
 
 計算ノードからは外部ネットワークに出られないことが多い。手順2をログインノードで済ませ、
 ジョブ内では `.venv/bin/python` を直接呼ぶこと（ジョブスクリプト内で `uv run` を使わない）。
+TRIDENTはGitHubから取得する依存パッケージなので、PyPIだけ許可されたプロキシ環境では
+これだけ失敗することがある(手順2参照)。
 
-### 10-5. ビルド中に `No space left on device`
+### 10-4. 経路Cでコマンドは通るのにパッチ/特徴量が0件
+
+TRIDENTの`--task`は前段の結果を前提にする(セグメンテーションが無いと座標抽出は
+`GeoJSON not found`で何もせずスキップする)。`main.py`は内部で`segment()`→`extract_coords()`の
+順に呼んでいるので通常は問題にならないが、`results/trident/`を使い回して個別に
+`src.trident_runner.TridentRunner`を直接叩くようなスクリプトを書く場合は、この順序を崩さないこと。
+
+セグメンテーション自体が空になるケースもある。`results/trident/wsi_states/<slide>__*.json`の
+`"reason"`を見る。代表的な原因:
+- スライドのピラミッドが薄い/単層で、`hest`が組織を検出できない → `--seg_conf_thresh 0.4`を試す、
+  またはCPUで動く`--segmenter otsu`に切り替える。
+- 生検の小片やTMAなど組織領域が小さい → `--min_tissue_proportion`を下げる。
+
+### 10-5. GPUを指定したのにCPUで動いている(遅い)
+
+`apptainer exec`に`--nv`を付け忘れると、コンテナ内から見えるGPUが無くなり
+`torch.cuda.is_available()`がFalseになる。`main.py`はGPUが見えない場合エラーにはせず
+自動的に`--segmenter otsu --device cpu`相当にフォールバックするため、静かに遅い経路へ
+切り替わって気づきにくい。手順5-2のように`--nv`を必ず付けること。
+
+### 10-6. Hugging Faceのgatedモデルでエラーになる(経路Cで`--patch_encoder`使用時)
+
+`uni_v1`など一部のパッチエンコーダはHugging Face上でアクセス許可が必要なモデル。
+`huggingface-cli login`とモデルページでのアクセス申請をログインノード側で先に済ませておくこと
+(手順2参照)。計算ノードにはネットワークが無いことが多く、ジョブの中で初めて認証しようとしても失敗する。
+
+### 10-7. ビルド中に `No space left on device`
 
 `APPTAINER_TMPDIR` が小さい `/tmp` を向いている。手順1のとおり容量のある場所に退避させる。

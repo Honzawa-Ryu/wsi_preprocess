@@ -2,17 +2,25 @@
 病理画像(WSI)の前処理用のツールを集めたもの。
 
 WSIからパッチを切り出し, ぼやけを定量し, そこから学習用データセットを構築するまでを扱う。
+コアのセグメンテーション・パッチ座標抽出・特徴量抽出は [TRIDENT](https://github.com/mahmoodlab/TRIDENT)
+に委譲し, ぼやけスコア付与と学習用パッチ抽出をその前後に挟み込むラッパー構成になっている
+(実装方針は [PLAN.md](PLAN.md) を参照)。TRIDENTはリポジトリに同梱せず, `pyproject.toml` の
+`[tool.uv.sources]` でGitHubから直接インストールする通常の依存パッケージとして扱っている。
 
 Slurm環境での実行手順（`.sif`の作成からデータセット書き出しまで）は
 [docs/howtouse.md](docs/howtouse.md) にまとめてある。
 
 # 環境構築
-WSIの読み出しには [tiffslide](https://github.com/Bayer-Group/tiffslide) を使っている。
-openslideと違いシステムパッケージのインストールは不要で, Pythonパッケージのみで完結する。
+WSIの読み出しには [tiffslide](https://github.com/Bayer-Group/tiffslide) を使っている
+(独自処理側。TRIDENT自体はopenslideを使う)。tiffslideはopenslideと違いシステムパッケージの
+インストールは不要で, Pythonパッケージのみで完結する。
 
 ```
 uv sync
 ```
+TRIDENTは `[tool.uv.sources]` で固定したコミットからビルドされるため, これだけで
+`import trident` が使えるようになる。トップレベルにTRIDENT本体は展開されない
+(`.venv/lib/.../site-packages/trident/` に入る)。
 
 LMDB形式でデータセットを出力する場合のみ, 追加で以下が必要。
 ```
@@ -21,46 +29,70 @@ uv add lmdb
 WebDataset形式(tar)の書き出しは標準ライブラリのみで行うため追加パッケージは不要。
 読み出し側で `webdataset` を使う場合は `uv add webdataset`。
 
-# 全体の流れ
+# 統合パイプライン (main.py)
 
-パッチの出所によって2通りの入口がある。どちらも最終的には同じ形式のh5になり,
-以降の手順を共通で使える。
+TRIDENTでのセグメンテーション+座標抽出から, ぼやけスコア付与, 学習用パッチ抽出までを
+1コマンドで実行できる。内部的には後述の各ツールを順番に呼び出しているだけなので,
+個別に実行したい場合は下の「含まれているツール」を直接使えばよい。
+
+```bash
+python main.py \
+    --wsi_dir data/wsis \
+    --out_dir results/trident \
+    --calc_blur \
+    --extract_patches 1000
+```
+
+| ステップ | 内容 | 実行条件 |
+| --- | --- | --- |
+| Step1 | TRIDENTでセグメンテーション+パッチ座標抽出 | 常に実行 |
+| Step2 | ぼやけスコアの計算・付与 | `--calc_blur` |
+| Step3 | TRIDENTで特徴量抽出 | `--patch_encoder <name>` (例: `uni_v1`) を指定したときのみ |
+| Step4 | 学習用パッチの抽出(画像ファイル+CSV) | `--extract_patches N` を指定したときのみ |
+
+Step2〜4を既定で無効にしているのは, 無条件にパッチ画像や特徴量を書き出すとディスクと
+実行時間を圧迫しやすいため。`--segmenter` / `--device` は未指定ならGPUの有無で自動選択する
+(GPUが無ければ `otsu` + CPU)。主なオプションは `python main.py --help` を参照。
+
+Python APIとしても呼べる。
+```python
+from main import run_pipeline
+
+run_pipeline(
+    wsi_dir="data/wsis",
+    out_dir="results/trident",
+    calc_blur=True,
+    extract_patches=1000,
+)
+```
+
+WebDataset/LMDBとしてまとめたい場合は, Step4の代わりに後述の
+`scripts/build_dataset.py` を `--out_dir` 配下の座標h5(`<out_dir>/<mag>x_<ps>px_.../patches`)
+に対して実行する。
+
+# 全体の流れ(個別ツールを使う場合)
+
+座標(coords)のみを持つh5を入口にして, 以降の手順を共通で使える。
+そのh5は `main.py` のStep1(TRIDENT呼び出し, GPUがあれば`hest`, 無ければ`otsu`でCPUのみでも動く)
+で作ってもよいし, 別途TRIDENTの `run_batch_of_slides.py` を直接実行して作ってもよい。
+どちらで作ったcoords h5でも, 以降は同じスクリプトで扱える。
 
 ```
-[A] 生WSI (.svs 等)                    [B] TRIDENTでパッチ切り出し済み
-        |                                       |
-        | scripts/make_patches.py               | (coordsのみを持つh5)
-        v                                       v
-   h5 (images + coords + blur)          scripts/add_blur_scores.py
-        |                                       | 元WSIから画素を読み直して
-        |                                       | blurスコアをh5に追記
-        +------------------+--------------------+
-                           v
-                 scripts/build_dataset.py
-              閾値でフィルタ -> スライドごとにN枚を抽出
-                           v
-              WebDataset (tar) または LMDB
+TRIDENT (main.py Step1 / run_batch_of_slides.py)
+        |
+        | coordsのみを持つh5
+        v
+scripts/add_blur_scores.py         (main.py --calc_blur も同じ処理)
+        | 元WSIから画素を読み直して
+        | blurスコアをh5に追記
+        v
+scripts/build_dataset.py
+   閾値でフィルタ -> スライドごとにN枚を抽出
+        v
+   WebDataset (tar) または LMDB
 ```
 
 # 含まれているツール
-
-## 背景の判別・除去 + パッチ切り出し (src/wsi_processer.py)
-WSIから背景部分を除き, 組織が含まれるpatchを取り出す。
-大津法で組織部を抽出し, 連結成分解析でスライスごとにIDを振る。
-切り出しと同時にぼやけスコアも計算してh5に保存する。
-
-```
-python scripts/make_patches.py <slide_dir> <out_dir> --n_workers 8
-```
-
-`<slide_dir>` の中がフォルダ分けされていても再帰的に探索し, 出力側にも同じ相対パスを
-再現する。深さは問わない。
-
-```
-data/caseA/2024/slide001.svs  ->  out/caseA/2024/slide001.h5
-data/caseB/slide002.svs       ->  out/caseB/slide002.h5
-data/slide003.svs             ->  out/slide003.h5
-```
 
 ## ぼやけの定量 (src/blur.py, scripts/add_blur_scores.py)
 ぼやけの指標は2種類あり, いずれも **値が大きいほど鮮明**。
@@ -119,6 +151,8 @@ python scripts/build_dataset.py <h5_dir> <out_dir> \
 別フォルダに同名のh5があるときだけ, 衝突するものを `caseA_slide001` のように相対パス由来の
 IDに置き換えて一意にする(衝突していないスライドのIDは変わらない)。
 元のh5は `manifest.json` の `per_slide[slide_id]["path"]` から辿れる。
+TRIDENTが書き出す `<slide>_patches.h5` という名前も, 末尾の `_patches` を自動で外して
+`slide_id`(=元のWSI名)として扱う。
 
 ### 出力の読み出し
 

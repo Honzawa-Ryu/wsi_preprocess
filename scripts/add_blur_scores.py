@@ -18,7 +18,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import blur
-from src.patch_source import PatchSource, WSIIndex, iter_h5_paths
+from src.patch_source import PatchSource, WSIIndex, iter_h5_paths, slide_stem
 
 
 def process_one(h5_path, wsi_path, patch_size, patch_level, overwrite):
@@ -78,9 +78,9 @@ def main(args):
     if args.wsi_dir:
         index = WSIIndex(args.wsi_dir)
         for p in h5_paths:
-            wsi_by_h5[p] = index.find(p.stem, p.relative_to(rel_root).parent)
+            wsi_by_h5[p] = index.find(slide_stem(p), p.relative_to(rel_root).parent)
         if index.ambiguous_stems:
-            hit = sorted(s for s in index.ambiguous_stems if s in {q.stem.lower() for q in h5_paths})
+            hit = sorted(s for s in index.ambiguous_stems if s in {slide_stem(q).lower() for q in h5_paths})
             if hit:
                 print(f"Warning: {args.wsi_dir} に同名のWSIが複数あります({len(hit)}件)。"
                       "h5と同じ相対フォルダにあるものを優先します")

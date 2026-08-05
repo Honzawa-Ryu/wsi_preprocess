@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src import blur
 from src.dataset_builder import (CODECS, LMDBWriter, ShardWriter, ShuffleBuffer,
                                  collect_slide_samples, make_slide_ids)
-from src.patch_source import WSIIndex, iter_h5_paths
+from src.patch_source import WSIIndex, iter_h5_paths, slide_stem
 
 
 def main(args):
@@ -39,13 +39,13 @@ def main(args):
     # slide_idはtar内のサンプルキーを兼ねるので、別フォルダの同名h5が衝突しないよう
     # ここで一意化する。衝突していないものはstemのまま。
     slide_ids = make_slide_ids(h5_paths, rel_root)
-    stems = Counter(p.stem for p in h5_paths)
+    stems = Counter(slide_stem(p) for p in h5_paths)
     duplicated = sorted(s for s, n in stems.items() if n > 1)
     if duplicated:
         print(f"Note: 同名のh5が複数フォルダにあります({len(duplicated)}件)。"
               "slide_idはフォルダ名を含む形に置き換えました")
         for stem in duplicated[:5]:
-            renamed = [slide_ids[p] for p in h5_paths if p.stem == stem]
+            renamed = [slide_ids[p] for p in h5_paths if slide_stem(p) == stem]
             print(f"  - {stem} -> {', '.join(renamed)}")
 
     if args.threshold is None and args.threshold_percentile is None:
@@ -62,7 +62,7 @@ def main(args):
     missing = []
     for p in h5_paths:
         # 同名WSIが複数ある場合に備え、h5側の相対フォルダを手がかりに渡す
-        wsi_path = index.find(p.stem, p.relative_to(rel_root).parent) if index else None
+        wsi_path = index.find(slide_stem(p), p.relative_to(rel_root).parent) if index else None
         if wsi_path is None and index:
             missing.append(slide_ids[p])
         jobs.append((p, wsi_path))
@@ -72,7 +72,7 @@ def main(args):
         for slide_id in missing[:5]:
             print(f"  - {slide_id}")
 
-    if index and index.ambiguous_stems & {p.stem.lower() for p in h5_paths}:
+    if index and index.ambiguous_stems & {slide_stem(p).lower() for p in h5_paths}:
         print(f"Note: {args.wsi_dir} に同名のWSIが複数あります。"
               "h5と同じ相対フォルダにあるものを優先して対応付けました")
 

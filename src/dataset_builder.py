@@ -23,7 +23,7 @@ import cv2
 import h5py
 import numpy as np
 
-from src.patch_source import PatchSource
+from src.patch_source import PatchSource, slide_stem
 
 # 画素をバイト列に符号化する方式。いずれも可逆（blur評価を壊さないため非可逆は避ける）
 CODECS = ("png", "npy")
@@ -38,16 +38,21 @@ def make_slide_ids(h5_paths, root):
 
     衝突していないstemはそのまま使う（臨床メタデータとの突き合わせで素のスライド名が
     要ることが多いため）。衝突したものだけ相対パスを繋いだIDに置き換える。
+
+    stemはTRIDENT形式("<slide>_patches.h5")の "_patches" サフィックスを剥がした
+    `slide_stem()` を使う。生のファイル名(`path.stem`)のままだと、素のWSI名と
+    一致しないslide_idになってしまう。
     """
-    counts = Counter(p.stem for p in h5_paths)
+    counts = Counter(slide_stem(p) for p in h5_paths)
 
     ids = {}
     taken = set()
     for path in h5_paths:
-        if counts[path.stem] == 1:
-            base = path.stem
+        stem = slide_stem(path)
+        if counts[stem] == 1:
+            base = stem
         else:
-            rel = path.relative_to(root).with_suffix("")
+            rel = path.relative_to(root).with_suffix("").with_name(stem)
             base = re.sub(r"[^0-9A-Za-z._-]+", "_", "_".join(rel.parts))
 
         # 相対パス由来のIDが、たまたま別スライドの素のstemと当たることもある

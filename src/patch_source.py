@@ -3,7 +3,8 @@
 対象とするh5は2種類ある。
 
 1. TRIDENT/CLAM形式 : `coords` のみを持ち、画素は元WSIから読み直す必要がある
-2. wsi_processer形式 : `images` に画素そのものを持つ
+2. `images` に画素そのものを持つ形式 : 過去に生成されたh5との互換用
+   (現在このリポジトリで新規に画素埋め込みh5を生成する経路は無い)
 
 どちらでも `PatchSource.read_patch(i)` でRGBのuint8配列が得られるようにする。
 """
@@ -18,6 +19,24 @@ WSI_EXTENSIONS = (".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".scn", ".vms", ".b
 
 # パッチh5として探索する拡張子
 H5_EXTENSIONS = (".h5", ".hdf5")
+
+# TRIDENTが座標h5を書き出す際のファイル名サフィックス ("<slide>_patches.h5")。
+# 画素埋め込み形式("<slide>.h5")には無い。
+_TRIDENT_COORDS_SUFFIX = "_patches"
+
+
+def slide_stem(h5_path):
+    """パッチh5のファイル名から、対応するWSIのstem(拡張子抜きファイル名)を求める。
+
+    TRIDENTは `<slide>_patches.h5` という名前で座標h5を書き出すため、単純に
+    `Path(h5_path).stem` を使うと "<slide>_patches" のままWSI検索やslide_id算出に
+    渡ってしまい、元のWSI名と一致しない。末尾が `_patches` の場合だけ剥がす
+    (画素埋め込み形式はサフィックスが無いため何もしない)。
+    """
+    stem = Path(h5_path).stem
+    if stem.endswith(_TRIDENT_COORDS_SUFFIX):
+        return stem[: -len(_TRIDENT_COORDS_SUFFIX)]
+    return stem
 
 
 def iter_files(root, extensions):
@@ -176,13 +195,33 @@ class PatchSource:
         self.has_images = "images" in self._h5
 
         # パッチサイズ/レベルの解決（明示指定 > h5属性 > 既定値）
+        # TRIDENT出力は"patch_level"属性を持たずlevel 0固定で読む前提のため、
+        # level 0でのクロップ幅である patch_size_level0 を優先する。
+        # (patch_size はターゲット倍率上の呼称サイズで、スライドのネイティブ倍率が
+        #  ターゲット倍率と異なると level 0 上では別の画素数になり、そのまま使うと
+        #  クロップ範囲がずれる。画素埋め込み形式のh5は patch_size_level0 を
+        #  持たないため、この優先順でも従来通り patch_size がそのまま使われる)
+        used_patch_size_level0 = self._patch_size_override is None and (
+            _get_attr(self._h5, ("patch_size_level0",), None) is not None
+        )
         self.patch_size = self._patch_size_override or int(
-            _get_attr(self._h5, ("patch_size", "patch_size_level0"), 256)
+            _get_attr(self._h5, ("patch_size_level0", "patch_size"), 256)
         )
         if self._patch_level_override is not None:
             self.patch_level = self._patch_level_override
         else:
             self.patch_level = int(_get_attr(self._h5, ("patch_level",), 0))
+
+        # patch_size_level0 は定義上level 0でのクロップ幅であり、level 0以外を
+        # 明示指定された場合にそのまま使うとクロップ範囲がずれる(ダウンサンプル分の
+        # 換算をしていないため)。この組み合わせは対応していないので黙って進めず、
+        # 早期に検出する。
+        if self.patch_level != 0 and used_patch_size_level0:
+            raise ValueError(
+                f"{self.h5_path.name}: patch_size_level0 (level 0基準のサイズ) と "
+                f"patch_level={self.patch_level} (0以外) の組み合わせは未対応です。"
+                "level 0以外で読み出す場合は patch_size を明示指定してください。"
+            )
 
         if not self.has_images:
             if self.wsi_path is None:
