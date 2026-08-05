@@ -1,0 +1,3 @@
+[submodule "trident"]
+	path = trident
+	url = https://github.com/mahmoodlab/TRIDENT.git
