@@ -23,8 +23,9 @@ class MacenkoStainNormalizer:
 
     def __init__(self, target_image_path):
         self.normalizer = torchstain.normalizers.MacenkoNormalizer(backend="torch")
-        target = Image.open(target_image_path).convert("RGB")
-        target_t = torch.from_numpy(np.array(target)).permute(2, 0, 1)
+        with Image.open(target_image_path) as img:
+            target = img.convert("RGB")
+        target_t = torch.from_numpy(np.array(target)).permute(2, 0, 1).to(torch.float32)
         self.normalizer.fit(target_t)
 
     def __call__(self, patch: Image.Image) -> Image.Image:
