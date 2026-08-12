@@ -1,5 +1,6 @@
 
 .apptainer*
+results/
 *.sif
 data
 *.log
