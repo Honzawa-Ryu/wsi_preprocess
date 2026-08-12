@@ -312,6 +312,10 @@ sbatch run_trident_gpu.sh
 `conch_v15`は`--patch_size 512 --mag 20`)。ずれると特徴量として意味を成さない値になる。
 選択肢と対応表は`.claude/skills/trident/reference.md`(Patch encoders節)を参照。
 
+`--stain_normalize_target <image>`を足すと、指定した画像を目標染色としてMacenko染色正規化
+(`torchstain`)をエンコーダの前処理の先頭に差し込む。パッチ画像自体は保存されず、特徴量抽出時に
+オンザフライで適用される(実装: `src/stain_norm.py`)。`--patch_encoder`を指定しない場合は無視される。
+
 ### 5-3. 出力先
 
 ```

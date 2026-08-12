@@ -100,9 +100,20 @@ class TridentRunner:
         )
         return self.coords_dir
 
-    def extract_features(self, patch_encoder="uni_v1", patch_encoder_ckpt_path=None):
-        """Step3: 特徴量抽出。特徴量h5が入るディレクトリを返す。"""
+    def extract_features(self, patch_encoder="uni_v1", patch_encoder_ckpt_path=None,
+                          stain_normalize_target=None):
+        """Step3: 特徴量抽出。特徴量h5が入るディレクトリを返す。
+
+        stain_normalize_target: 指定すると、そのパス(画像1枚)を目標染色として
+        Macenko染色正規化(torchstain)をencoderの`eval_transforms`の先頭に差し込む。
+        パッチ画像自体はディスクに保存されず、特徴量抽出時にオンザフライで適用される。
+        """
         encoder = encoder_factory(patch_encoder, weights_path=patch_encoder_ckpt_path)
+        if stain_normalize_target:
+            from src.stain_norm import wrap_eval_transforms
+            encoder.eval_transforms = wrap_eval_transforms(
+                encoder.eval_transforms, stain_normalize_target
+            )
         features_dir = self.processor.run_patch_feature_extraction_job(
             coords_dir=self.coords_dirname,
             patch_encoder=encoder,

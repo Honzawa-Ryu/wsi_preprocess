@@ -64,6 +64,7 @@ def run_pipeline(
     # Step3 (TRIDENT: feature extraction)
     patch_encoder=None,
     patch_encoder_ckpt_path=None,
+    stain_normalize_target=None,
     # Step4 (patch extraction)
     patch_metric="blur_scores_val",
     patch_threshold=None,
@@ -140,6 +141,7 @@ def run_pipeline(
         features_dir = runner.extract_features(
             patch_encoder=patch_encoder,
             patch_encoder_ckpt_path=patch_encoder_ckpt_path,
+            stain_normalize_target=stain_normalize_target,
         )
 
     patches_dir = None
@@ -209,6 +211,9 @@ def build_arg_parser():
     feat.add_argument("--patch_encoder", type=str, default=None,
                       help="指定すると特徴量抽出(Step3)を実行する (例: uni_v1, conch_v15)")
     feat.add_argument("--patch_encoder_ckpt_path", type=str, default=None)
+    feat.add_argument("--stain_normalize_target", type=str, default=None,
+                      help="指定すると、この画像を目標染色としてMacenko染色正規化"
+                           "(torchstain)をencoderのeval_transformsの先頭に差し込む")
 
     # Step4 (patch extraction, optional)
     ext = parser.add_argument_group("Step4: patch extraction (optional)")
@@ -246,6 +251,7 @@ def main(argv=None):
         blur_overwrite=args.blur_overwrite,
         patch_encoder=args.patch_encoder,
         patch_encoder_ckpt_path=args.patch_encoder_ckpt_path,
+        stain_normalize_target=args.stain_normalize_target,
         patch_metric=args.patch_metric,
         patch_threshold=args.patch_threshold,
         patch_threshold_percentile=args.patch_threshold_percentile,

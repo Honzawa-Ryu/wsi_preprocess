@@ -10,6 +10,7 @@ dependencies = [
     "tiffslide",
     "tqdm",
     "trident",
+    "torchstain>=1.4.1",
 ]
 
 [build-system]
@@ -22,6 +23,12 @@ build-backend = "hatchling.build"
 # 確認すること。
 [tool.uv.sources]
 trident = { git = "https://github.com/mahmoodlab/TRIDENT.git", rev = "457756c82946167f3400ce614f3141504f9318d9" }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyterlab>=4.6.3",
+]
 
 # このプロジェクト自体は `wsi_preprocess` としてimportされるライブラリではなく、
 # main.py / scripts/*.py を直接実行するアプリケーション(src/はsys.path経由で解決)。
