@@ -1,4 +1,13 @@
-__pycache__/
+
+.apptainer*
+results/
+*.sif
+data
+*.log
+*.err
+*.out
+__pycache__
+.agent*
 
 data/
 

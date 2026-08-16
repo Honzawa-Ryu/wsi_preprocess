@@ -1,14 +1,40 @@
 [project]
 name = "wsi-preprocess"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+
 requires-python = ">=3.12"
 dependencies = [
-    "matplotlib>=3.10.8",
-    "numpy>=2.4.2",
-    "opencv-python>=4.13.0.92",
-    "openslide-python>=1.4.3",
-    "pandas>=3.0.0",
-    "tqdm>=4.67.3",
+    "numpy",
+    "opencv-python-headless",
+    "h5py",
+    "tiffslide",
+    "tqdm",
+    "trident",
+    "torchstain>=1.4.1",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# TRIDENTはPyPIには無いため、GitHubから直接インストールする(Submodule化は不要)。
+# revはこのプロジェクトのコード(src/trident_runner.py)がAPIを確認した時点の
+# コミットに固定している。上げる場合はProcessorのメソッドシグネチャに変更が無いか
+# 確認すること。
+[tool.uv.sources]
+trident = { git = "https://github.com/mahmoodlab/TRIDENT.git", rev = "457756c82946167f3400ce614f3141504f9318d9" }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyterlab>=4.6.3",
+]
+
+# このプロジェクト自体は `wsi_preprocess` としてimportされるライブラリではなく、
+# main.py / scripts/*.py を直接実行するアプリケーション(src/はsys.path経由で解決)。
+# hatchlingにインストール対象のパッケージを自動検出させようとすると
+# (プロジェクト名と一致するディレクトリが無いため)失敗するので、
+# uvにはこのプロジェクト自体のビルド・インストールをさせず、依存関係の解決のみ行わせる。
+[tool.uv]
+package = false
+
